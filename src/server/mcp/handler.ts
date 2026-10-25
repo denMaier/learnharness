@@ -7,6 +7,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult } fr
 import { proberGraphTools } from "../../agent/tools/graph.ts";
 import { toolsForRole } from "../chat-handler.ts";
 import { stores } from "../stores.ts";
+import { stashMcpDetails } from "./details.ts";
 import { resolveMcpToken, type McpScope } from "./tokens.ts";
 
 /**
@@ -44,11 +45,11 @@ function toolsForScope(scope: McpScope): Record<string, AgentTool<any>> {
  *  job records correlated with the transcript; otherwise a fresh id is
  *  minted. Verified 2026-10-25: Claude Code 2.1.285 sends
  *  `_meta["claudecode/toolUseId"]` (its native `toolu_…` id). */
-function toolCallIdOf(meta: Record<string, unknown> | undefined): string {
+function nativeToolCallId(meta: Record<string, unknown> | undefined): string | undefined {
 	for (const [key, value] of Object.entries(meta ?? {})) {
 		if (typeof value === "string" && value && /tool(Use|Call)Id$/i.test(key)) return value;
 	}
-	return `mcp_${randomUUID()}`;
+	return undefined;
 }
 
 function errorResult(text: string): CallToolResult {
@@ -73,6 +74,7 @@ export async function callAgentTool(
 	args: unknown,
 	toolCallId: string,
 	signal?: AbortSignal,
+	onDetails?: (details: unknown) => void,
 ): Promise<CallToolResult> {
 	const tool = tools[name];
 	if (!tool) return errorResult(`Tool ${name} not found`);
@@ -84,7 +86,9 @@ export async function callAgentTool(
 			name,
 			arguments: prepared as ToolCall["arguments"],
 		});
-		return toMcpResult(await tool.execute(toolCallId, validated, signal));
+		const result = await tool.execute(toolCallId, validated, signal);
+		onDetails?.(result.details);
+		return toMcpResult(result);
 	} catch (err) {
 		return errorResult(err instanceof Error ? err.message : String(err));
 	}
@@ -113,9 +117,19 @@ export async function handleMcpRequest(req: Request): Promise<Response> {
 			inputSchema: tool.parameters as { type: "object"; [key: string]: unknown },
 		})),
 	}));
-	server.setRequestHandler(CallToolRequestSchema, async (request, extra) =>
-		callAgentTool(tools, request.params.name, request.params.arguments ?? {}, toolCallIdOf(request.params._meta), extra.signal),
-	);
+	server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+		const nativeId = nativeToolCallId(request.params._meta);
+		return callAgentTool(
+			tools,
+			request.params.name,
+			request.params.arguments ?? {},
+			nativeId ?? `mcp_${randomUUID()}`,
+			extra.signal,
+			// Details ride back to the driver out of band, keyed by the id it
+			// will see in the transcript (details.ts) — only when there is one.
+			nativeId ? (details) => stashMcpDetails(nativeId, details) : undefined,
+		);
+	});
 
 	const transport = new WebStandardStreamableHTTPServerTransport({
 		sessionIdGenerator: undefined,

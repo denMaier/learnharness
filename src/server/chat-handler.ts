@@ -6,6 +6,9 @@ import {
 	type AgentBuildOptions,
 } from "../agent/teacher-agent.ts";
 import type { TurnAgent } from "../agent/turn-agent.ts";
+import { CLAUDE_CODE_PROVIDER, ClaudeCodeAgent } from "./harness/claude-code.ts";
+import { harnessCwd, harnessMcpUrl } from "./harness/runtime.ts";
+import type { HarnessSession } from "../core/contracts.ts";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { createProberTools, createTeacherTools, type ProberToolContext, type TeacherToolContext } from "../agent/tools.ts";
 import { practiceTools, type PracticeToolContext } from "../agent/tools/practice.ts";
@@ -205,6 +208,37 @@ function proberToolContext(chatId: string, effective: EffectiveSettings): Prober
 	};
 }
 
+/** The Claude Code conversation driver for one turn (harness branch). The
+ *  tools reach it over /api/mcp (toolsForRole below), so only the prompt,
+ *  the session and the money channel are wired here. */
+function claudeCodeAgent(
+	chatId: string,
+	role: "prober" | "teacher" | "practice",
+	opts: AgentBuildOptions,
+	model: string | undefined,
+	session: HarnessSession | undefined,
+): TurnAgent {
+	return new ClaudeCodeAgent({
+		chatId,
+		role,
+		messages: opts.messages ?? [],
+		systemPrompt: composeInstructions(role, opts.promptSwitches),
+		...(model ? { model } : {}),
+		...(session?.driver === "claude-code" ? { session: { sessionId: session.sessionId, role: session.role } } : {}),
+		onSession: (next) => {
+			try {
+				stores.chatStore.saveHarnessSession(chatId, { driver: "claude-code", ...next });
+			} catch (err) {
+				console.error(`[chat ${chatId}] harness session persist failed:`, err);
+			}
+		},
+		...(opts.onUsage ? { onUsage: opts.onUsage } : {}),
+		mcpUrl: harnessMcpUrl(),
+		cwd: harnessCwd("claude-code"),
+		...(process.env.LH_CLAUDE_CODE_PATH ? { claudePath: process.env.LH_CLAUDE_CODE_PATH } : {}),
+	});
+}
+
 /** The role-scoped tool registry exactly as a turn would build it (same
  *  contexts, same user toggles) — the MCP toolkit's source. Settings are
  *  read fresh per call, like a turn's. */
@@ -264,8 +298,15 @@ export async function handleChatInput(
 	// write-ahead persist (nothing durable changes), and every downstream
 	// resolution (jobs/extraction gate per-need on their own tiers).
 	const effective = effectiveSettings();
-	const conversation = resolveConversationSpec(record.settings, effective.models.strong);
-	if (!conversation) {
+	// THE HARNESS BRANCH (docs/harness-orchestration.md): a chat pinned to an
+	// external harness (settings.harness — Claude Code first) runs its
+	// conversation there. The pi model chain, the provider-key gate, the
+	// subscription request cycle and LH compaction (the harness manages its
+	// own context window) do not apply; everything after these gates —
+	// appends, liveness, write-ahead persist, steers, settle — is shared.
+	const harness = record.settings?.harness;
+	const conversation = harness ? undefined : resolveConversationSpec(record.settings, effective.models.strong);
+	if (!harness && !conversation) {
 		const envelope = modelsNotConfigured(["strong"]);
 		console.info(`[chat ${chatId}] turn refused — ${JSON.stringify(envelope)}`);
 		return Response.json(envelope, { status: 503 });
@@ -280,16 +321,18 @@ export async function handleChatInput(
 	// persist (nothing durable changes); wake-pipeline turns ride the same
 	// path. The affected tier is strong — the conversation chain's own tier
 	// (a chat.model override still resolves through it).
-	if (isSubscriptionProvider(conversation.provider)) {
-		await refreshConnectionCatalog(conversation.provider);
-		if (input.type === "steers" && !connectionBackgroundAllowed(conversation.provider)) {
-			return Response.json({ error: "Background use is off for this connection. Automatic follow-up remains deferred in its queue." }, { status: 403 });
+	if (conversation) {
+		if (isSubscriptionProvider(conversation.provider)) {
+			await refreshConnectionCatalog(conversation.provider);
+			if (input.type === "steers" && !connectionBackgroundAllowed(conversation.provider)) {
+				return Response.json({ error: "Background use is off for this connection. Automatic follow-up remains deferred in its queue." }, { status: 403 });
+			}
 		}
-	}
-	if (!providerKeyPresent(conversation.provider)) {
-		const envelope = providerKeyMissingEnvelope(conversation.provider, ["strong"]);
-		console.info(`[chat ${chatId}] turn refused — ${JSON.stringify(envelope)}`);
-		return Response.json(envelope, { status: 503 });
+		if (!providerKeyPresent(conversation.provider)) {
+			const envelope = providerKeyMissingEnvelope(conversation.provider, ["strong"]);
+			console.info(`[chat ${chatId}] turn refused — ${JSON.stringify(envelope)}`);
+			return Response.json(envelope, { status: 503 });
+		}
 	}
 
 	// THE COMPACTION GATE (owner round 14, 2026-10-05 — the structural
@@ -308,27 +351,29 @@ export async function handleChatInput(
 		beforeDispatch: (scope) => requestCycle?.beforeDispatch(scope),
 		noDispatch: (kind) => requestCycle?.noDispatch(kind),
 	};
-	let conversationEngine: PiEngine;
-	try { conversationEngine = piEngineForSpec(conversation, () => callPurpose.background, lifecycle); }
-	catch { return Response.json({ error: conversation.provider === "chatgpt" ? chatGPTStreamError("model catalog") : isSubscriptionProvider(conversation.provider) ? nativeSubscriptionError(conversation.provider, "model catalog") : "The selected model is unavailable." }, { status: 503 }); }
-	const modelIdForCompaction = `${conversationEngine.model.provider}:${conversationEngine.model.id}`;
-	await ensureCompacted(
-		{
-			chatStore: stores.chatStore,
-			engine: piEngineForSpec(conversation, true),
-			canStart: () => connectionBackgroundAllowed(conversation.provider),
-			modelId: modelIdForCompaction,
-			kind: record.kind === "practice" ? "practice" : hasProbeDone(record.messages) ? "teach" : "probe",
-			thresholdTokens: effectiveThresholdTokens(
-				effective.compaction?.thresholdTokens,
-				catalogContextLimits().get(modelIdForCompaction),
-			),
-			systemPromptTokens: Math.ceil(composeInstructions(record.kind === "practice" ? "practice" : "teacher").length / 4),
-		},
-		chatId,
-	);
-	const compactedRecord = stores.chatStore.getChat(chatId);
-	if (compactedRecord) record = compactedRecord;
+	let conversationEngine: PiEngine | undefined;
+	if (conversation) {
+		try { conversationEngine = piEngineForSpec(conversation, () => callPurpose.background, lifecycle); }
+		catch { return Response.json({ error: conversation.provider === "chatgpt" ? chatGPTStreamError("model catalog") : isSubscriptionProvider(conversation.provider) ? nativeSubscriptionError(conversation.provider, "model catalog") : "The selected model is unavailable." }, { status: 503 }); }
+		const modelIdForCompaction = `${conversationEngine.model.provider}:${conversationEngine.model.id}`;
+		await ensureCompacted(
+			{
+				chatStore: stores.chatStore,
+				engine: piEngineForSpec(conversation, true),
+				canStart: () => connectionBackgroundAllowed(conversation.provider),
+				modelId: modelIdForCompaction,
+				kind: record.kind === "practice" ? "practice" : hasProbeDone(record.messages) ? "teach" : "probe",
+				thresholdTokens: effectiveThresholdTokens(
+					effective.compaction?.thresholdTokens,
+					catalogContextLimits().get(modelIdForCompaction),
+				),
+				systemPromptTokens: Math.ceil(composeInstructions(record.kind === "practice" ? "practice" : "teacher").length / 4),
+			},
+			chatId,
+		);
+		const compactedRecord = stores.chatStore.getChat(chatId);
+		if (compactedRecord) record = compactedRecord;
+	}
 
 	// The input's native appends (pure; the honest 400 for an answer with no
 	// pending question call). Computed BEFORE beginTurn so a refused input
@@ -382,7 +427,7 @@ export async function handleChatInput(
 	// ride this same write-ahead - the pump de-queued them at fire, so this
 	// is the ONLY copy ever appended.)
 	const merged = [...record.messages, ...appends];
-	const stagedAutomatic = isSubscriptionProvider(conversation.provider) && input.type === "steers";
+	const stagedAutomatic = isSubscriptionProvider(conversation?.provider) && input.type === "steers";
 	let persistBaseCount = stagedAutomatic ? record.messages.length : merged.length;
 	try {
 		if (!stagedAutomatic) stores.chatStore.saveMessages(chatId, merged);
@@ -427,7 +472,9 @@ export async function handleChatInput(
 	const engine = conversationEngine;
 	// Provider-qualified stamp (model slots wave): matches the price table's
 	// provider:id keys.
-	const modelId = `${engine.model.provider}:${engine.model.id}`;
+	// A harness chat stamps the harness and its model name ("claude-code:sonnet");
+	// the price table has no such rows, so read-time cost renders as absent.
+	const modelId = engine ? `${engine.model.provider}:${engine.model.id}` : `${CLAUDE_CODE_PROVIDER}:${harness?.model ?? "default"}`;
 	// Tests inject a factory: the agent is stateless per turn, so each
 	// request builds a fresh one off the record — the factory mirrors that
 	// seam exactly. Wave B: the record IS the agent state (native messages;
@@ -437,7 +484,7 @@ export async function handleChatInput(
 	// enabled). The definitive toggleable set is TOGGLEABLE_TOOLS — the
 	// sub-agent JOB tools (research/demo/visual/pdf; adjudicated with the
 	// user: quiz/ask/fs/plan/probe_done are always-on).
-	if (isSubscriptionProvider(conversation.provider)) requestCycle = new SubscriptionRequestCycle({
+	if (conversation && isSubscriptionProvider(conversation.provider)) requestCycle = new SubscriptionRequestCycle({
 		initialMessages: asAgentMessages(merged),
 		staged: stagedAutomatic ? asAgentMessages(appends) : undefined,
 		foregroundOwed: !callPurpose.background,
@@ -466,8 +513,11 @@ export async function handleChatInput(
 	// split, no plan/question/job tools; the whole registry is
 	// problem + conclude. buildAgent stays honored (the test seam is
 	// uniform across kinds).
+	const role = record.kind === "practice" ? "practice" : teaching ? "teacher" : "prober";
 	const constructed: TurnAgent = buildAgent
 		? buildAgent({ ...agentOpts, teaching })
+		: harness
+			? claudeCodeAgent(chatId, role, agentOpts, harness.model, record.harnessSession)
 		: record.kind === "practice"
 			? createPracticeAgent(practiceToolContext(chatId, effective), agentOpts)
 			: teaching
@@ -514,8 +564,8 @@ export async function handleChatInput(
 			// route through here: they ride the error-result path and reach the
 			// transcript directly (the retry context the model saw).
 			onError: (error) => {
-				if (conversation.provider === "chatgpt") return chatGPTStreamError(String(error));
-				if (isSubscriptionProvider(conversation.provider)) return nativeSubscriptionError(conversation.provider, String(error));
+				if (conversation?.provider === "chatgpt") return chatGPTStreamError(String(error));
+				if (conversation && isSubscriptionProvider(conversation.provider)) return nativeSubscriptionError(conversation.provider, String(error));
 				console.error(`[chat ${chatId}] turn error:`, error);
 				return "An error occurred.";
 			},

@@ -12,7 +12,7 @@ import * as path from "node:path";
 import { PATHS } from "../../config.ts";
 import { emit } from "../core/events.ts";
 import type { ChatStore } from "../core/ports.ts";
-import type { ChatRecord, ChatSettings, ChatSummary, ExtractionRunUsage, PlanTree, TurnUsage } from "../core/contracts.ts";
+import type { ChatRecord, ChatSettings, ChatSummary, ExtractionRunUsage, HarnessSession, PlanTree, TurnUsage } from "../core/contracts.ts";
 import { CURRENT_CHAT_VERSION } from "../core/contracts.ts";
 import type { LhMessage } from "../core/native-messages.ts";
 import { activeProblemOf, danglingQuestionOf } from "../core/native-messages.ts";
@@ -167,6 +167,16 @@ function saveSettings(id: string, settings: ChatSettings): void {
 	writeChat(record);
 }
 
+/** Persist (or clear) the chat's harness session (docs/harness-orchestration.md).
+ * Like saveSettings, NOT conversation activity: updatedAt stays put. */
+function saveHarnessSession(id: string, session: HarnessSession | undefined): void {
+	const record = getChat(id);
+	if (!record) throw new Error(`Chat not found: ${id}`);
+	if (session) record.harnessSession = session;
+	else delete record.harnessSession;
+	writeChat(record);
+}
+
 /** Rename a session (the header's click-to-edit title, 2026-09-17). Like
  * saveSettings, a rename is NOT conversation activity: updatedAt stays put
  * so sidebar order never churns. Same fallback as createChat — the empty
@@ -212,6 +222,7 @@ export const chatStore: ChatStore = {
 	saveMessages,
 	saveTree,
 	saveSettings,
+	saveHarnessSession,
 	renameChat,
 	deleteChat,
 	appendTurnUsage,

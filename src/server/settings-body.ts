@@ -38,6 +38,7 @@ export function parseSettingsBody(body: unknown): SettingsBodyResult<ChatSetting
 	const raw = body as {
 		model?: { provider?: unknown; id?: unknown };
 		thinkingLevel?: unknown;
+		harness?: { driver?: unknown; model?: unknown };
 	};
 	const settings: ChatSettings = {};
 	if (raw.model !== undefined) {
@@ -56,6 +57,19 @@ export function parseSettingsBody(body: unknown): SettingsBodyResult<ChatSetting
 			return { ok: false, error: "thinkingLevel must be a string" };
 		}
 		settings.thinkingLevel = raw.thinkingLevel as ThinkingLevel;
+	}
+	// The external harness (docs/harness-orchestration.md): {driver, model?}.
+	// Strict like the fields above; the driver set is checked here because
+	// it is a closed union, not a catalog lookup.
+	if (raw.harness !== undefined) {
+		const h = raw.harness;
+		if (typeof h !== "object" || h === null || h.driver !== "claude-code") {
+			return { ok: false, error: 'harness must be {driver: "claude-code", model?}' };
+		}
+		if (h.model !== undefined && (typeof h.model !== "string" || !h.model.trim())) {
+			return { ok: false, error: "harness.model must be a non-empty string" };
+		}
+		settings.harness = { driver: "claude-code", ...(typeof h.model === "string" ? { model: h.model.trim() } : {}) };
 	}
 	// Wave 7 killed the graph-context injection (owner: zero configuration
 	// beyond chat models — the prober reads its map through tools now); its

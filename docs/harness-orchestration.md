@@ -105,31 +105,63 @@ app/api/mcp/route.ts → src/server/mcp/  wraps the SAME AgentTool registries   
   `_meta["claudecode/toolUseId"]` with its native `toolu_…` id, which the handler uses as the
   `toolCallId`, so job records line up with the transcript's tool calls.
 
-## Phase 2 preview: the Claude Code driver (design only, not started)
+## Phase 2: the Claude Code driver (as built, 2026-10-25)
 
-`ClaudeCodeAgent` implements `TurnAgent`:
+**Selecting it.** A chat opts in with `PUT /api/chats/:id/settings`
+`{"harness": {"driver": "claude-code", "model": "sonnet"}}`. `model` is any Claude Code model
+name and is optional. There is no picker UI yet. Harness chats skip the pi-only steps: the
+model chain, the provider-key gate, the subscription request cycle and LH compaction (Claude
+Code manages its own context). Everything after those gates is shared: appends, liveness,
+write-ahead persist, steers, settle and extraction.
 
-- **`continue()`** sends the record's unsent tail to the Claude session. The tail is the
-  learner's text, or quiz answers rendered as a user message tagged with the toolCallId. It uses
-  `resume: nativeSessionId`, or starts fresh with a portable handoff built from the record when
-  resume is impossible.
-- **SDK messages to pi messages:** assistant text and thinking blocks, and `tool_use`
-  `mcp__learnharness__X` → `toolCall X`. MCP tool results → `ToolResultMessage`, except that a
-  question tool's posed result is dropped, as `persistTurn` already does. The learner's answer
-  becomes that call's native result, exactly as today. Usage comes through in the subscription
-  dialect LH already has (no dollars).
-- **`steer()`** pushes a user message into the SDK's streaming-input queue.
-  **`abort()`** calls `query.interrupt()`.
-- **Lockdown:** `tools` allows only `mcp__learnharness__*`, Read/Glob/Grep (cwd = learner files
-  dir) and WebSearch/WebFetch. A `canUseTool` hook denies everything else. `systemPrompt` is
-  the composed LH prompt in replace mode, not the Claude Code preset.
-- **Prober → teacher:** one Claude session per phase. `probe_done` ends the prober session, and
-  the teacher session starts with the handoff marker text (already single-sourced as `HANDOFF_TEXT`).
-- **Record additions:** `harness: {driver: "claude-code", sessionId, phase}`.
-- **Auth:** the user's own `claude auth login`. The health probe must not open a session (t3code lesson).
+**Files.**
+- `src/server/harness/claude-code.ts`: `ClaudeCodeAgent implements TurnAgent`.
+- `src/server/harness/runtime.ts`: the MCP URL comes from `PORT`, overridable with `LH_MCP_URL`.
+  The cwd is `<data>/harness/claude-code`.
+- `src/server/mcp/details.ts`: tool `details` travel out of band, keyed by Claude's tool-use id.
+- The handler branch is `claudeCodeAgent()` in `chat-handler.ts`.
+- The record gets `harnessSession {driver, sessionId, role}`, written only through
+  `ChatStore.saveHarnessSession`.
 
-Later phases are unchanged in spirit: background agents through a `runHarnessSubmitAgent` seam,
-then Codex app-server, then ACP. Optionally, MCP Apps so a lesson can render inside t3code.
+**Mapping.**
+- SDK `stream_event`s drive the live `message_update` preview. The SDK's `assistant`
+  messages are the authoritative content.
+- `tool_use mcp__learnharness__X` becomes `toolCall X`, keeping Claude's `toolu_…` id.
+- `tool_result` becomes a `ToolResultMessage` with its MCP-side `details`, plus
+  `tool_execution_start`/`end` events (the dock mounts on `end`).
+- Usage is stamped `claude-code:<model>` with tokens only. The price table has no such rows,
+  so cost renders as absent.
+
+**Turn-ending tools.** `QUESTION_TOOLS` (result dropped, so the answer becomes it) and
+`problem` (result kept) interrupt Claude right after the result, which is pi's `terminate: true`.
+
+**Sessions.** A same-role session resumes, and Claude gets only the record's tail since its
+last assistant message. A different role or a missing session starts fresh, with the
+model-facing transcript (`toLlmMessages`) as a portable handoff. This is the probe→teach switch.
+
+**Lockdown.**
+- `tools: []`: no built-ins.
+- `strictMcpConfig`, `settingSources: []`: none of the learner's Claude settings, CLAUDE.md or
+  MCP servers.
+- `canUseTool` allows only `mcp__learnharness__*`. An `allowedTools` wildcard would bypass the
+  callback, so there is none.
+- A per-run MCP token, revoked when the run ends.
+
+**Live-verified** on Claude Code with Haiku, through the dev server. A full probe ran: five
+questions (`probe`, `ask_user_question`, open text), then `probe_done`. The handoff wake
+started a new teacher session, which called `plan_init`. Two findings from that run:
+- Claude Code omits thinking text by default. Requesting
+  `thinking: {type: "adaptive", display: "summarized"}` restores readable reasoning.
+- Empty signature-only blocks are dropped.
+
+**Known limits / next.**
+- Steers are delivered when Claude's current turn completes, not mid-run.
+- There is no model picker UI.
+- Background roles (research/demo/visual, extraction, practice generation) still need pi
+  model slots. That is Phase 4.
+- A desktop package would need the SDK's native binary or `LH_CLAUDE_CODE_PATH` pointing at
+  an installed `claude`.
+- `next dev -p` alone does not set `PORT`. Set `PORT` (or `LH_MCP_URL`) when the dev port isn't 3000.
 
 ## Risks
 

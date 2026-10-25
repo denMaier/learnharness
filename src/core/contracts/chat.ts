@@ -52,6 +52,8 @@ export interface ChatRecord {
 	extractions?: ExtractionRunUsage[];
 	/** Per-chat model/thinking overrides for the conversation agents. */
 	settings?: ChatSettings;
+	/** The external harness session this chat resumes (settings.harness). */
+	harnessSession?: HarnessSession;
 	/** SCHEMA STAMP (schema-versioning wave, owner 2026-10-10): LAZY v1 —
 	 *  existing records stay unstamped (absence reads as v1); every write
 	 *  stamps the current version. A record stamped NEWER than this build
@@ -78,6 +80,30 @@ export interface ChatSettings {
 	/** pi thinking level — must be in the chosen model's supported list
 	 *  (getSupportedThinkingLevels; enforced by the settings route). */
 	thinkingLevel?: ThinkingLevel;
+	/** Run the conversation on an external harness instead of the in-process
+	 *  pi engine (docs/harness-orchestration.md). Absent = pi (BYOK). When
+	 *  set, `model`/`thinkingLevel` are not used for the conversation. */
+	harness?: HarnessSettings;
+}
+
+/** The external harnesses a conversation can run on. */
+export type HarnessDriver = "claude-code";
+
+export interface HarnessSettings {
+	driver: HarnessDriver;
+	/** The harness's own model name ("sonnet", "opus", "haiku", or a full
+	 *  id); absent = the harness default. */
+	model?: string;
+}
+
+/** The harness's resumable conversation for this chat — runtime state the
+ *  turn pipeline writes (never a setting: a settings PUT replaces the whole
+ *  settings object). One session per agent role; a role change starts a
+ *  new session from a portable handoff of the record. */
+export interface HarnessSession {
+	driver: HarnessDriver;
+	sessionId: string;
+	role: "prober" | "teacher" | "practice";
 }
 
 
