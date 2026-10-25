@@ -1,7 +1,8 @@
-import type { Agent, AgentEvent, AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AgentEvent, AgentMessage } from "@earendil-works/pi-agent-core";
 import type { SteerMessage } from "../../core/contracts.ts";
 import { noteSteerVisible } from "../jobs.ts";
 import { ToolCallIdUniquifier } from "./call-ids.ts";
+import type { TurnAgent } from "../../agent/turn-agent.ts";
 import type { ChatGPTRequestCycle } from "../../agent/chatgpt-request-cycle.ts";
 
 /**
@@ -74,7 +75,7 @@ export type TurnWireEvent =
 export interface PiTurnSpec {
 	requestCycle?: ChatGPTRequestCycle;
 	/** The per-turn agent (stateless engine — built from the record). */
-	agent: Agent;
+	agent: TurnAgent;
 	/** The handler's error-masking policy for LOOP-level failures (the
 	 *  event stream itself is verbatim — provider errors ride their
 	 *  message's stopReason/errorMessage through untouched). */

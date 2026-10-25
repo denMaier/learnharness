@@ -70,7 +70,7 @@ import { stores, effectiveSettings } from "./stores.ts";
 import { resolveConversationSpec } from "../core/settings-resolution.ts";
 import { connectionBackgroundAllowed, isSubscriptionProvider, onSubscriptionChange } from "../agent/subscription-connections.ts";
 import { isTurnRunning } from "./turn-liveness.ts";
-import type { Agent } from "@earendil-works/pi-agent-core";
+import type { TurnAgent } from "../agent/turn-agent.ts";
 
 /** Fires one server-side teacher turn: (chatId, input) → HTTP-ish status.
  *  Wave C: the input is the IDLE WAKE — every queued marker as the turn's
@@ -89,7 +89,7 @@ interface QueuedSteer {
 	 *  the hand-off helper. Guards double-handoff (a re-pumped loop or a
 	 *  re-registered run must not re-queue what a run already holds) and is
 	 *  CLEARED at settlement for markers the dying run never injected. */
-	handedTo?: Agent;
+	handedTo?: TurnAgent;
 }
 
 interface WakeState {
@@ -108,13 +108,13 @@ interface WakeState {
 	/** chatId → the agent of the CURRENTLY streaming turn (cleared at
 	 *  settlement, before settleSteers). The pump's live path hands
 	 *  markers to this agent's follow-up queue. */
-	liveAgents: Map<string, Agent>;
+	liveAgents: Map<string, TurnAgent>;
 	/** Chats whose pump loop is currently active (serialization per chat). */
 	pumping: Set<string>;
 	/** Throttle bookkeeping for the stale-job sweep. */
 	lastSweepAt: number;
 	stopConnectionWatch?: () => void;
-	automaticDeferred: WeakSet<Agent>;
+	automaticDeferred: WeakSet<TurnAgent>;
 }
 
 interface LhWakeGlobal {
@@ -214,13 +214,13 @@ export function deliverJobResult(steer: SteerMessage): Promise<void> {
  *  beats the loop's synchronous start-poll drain and the marker rides the
  *  run's FIRST LLM call (the native equivalent of the old continuation
  *  coalescing). */
-export function automaticFollowUpAllowed(chatId: string, agent?: Agent): boolean {
+export function automaticFollowUpAllowed(chatId: string, agent?: TurnAgent): boolean {
 	if (agent && state().automaticDeferred.has(agent)) return false;
 	const provider = agent?.state?.model?.provider ?? resolveConversationSpec(stores.chatStore.getChat(chatId)?.settings, effectiveSettings().models.strong)?.provider;
 	return connectionBackgroundAllowed(provider);
 }
 
-function handOffEligible(chatId: string, agent: Agent): void {
+function handOffEligible(chatId: string, agent: TurnAgent): void {
 	const queue = state().queues.get(chatId);
 	// Keep automatic results in their owning registry. Never mix them into a
 	// foreground batch without express account consent. Learner steers below
@@ -254,7 +254,7 @@ function handOffEligible(chatId: string, agent: Agent): void {
  *  markers are steered into the run right here. The settle seam cannot
  *  beat the registration: settlement needs a streamed response, which
  *  never happens inside the constructor call. */
-export function registerLiveAgent(chatId: string, agent: Agent): void {
+export function registerLiveAgent(chatId: string, agent: TurnAgent): void {
 	state().liveAgents.set(chatId, agent);
 	handOffEligible(chatId, agent);
 }
@@ -264,7 +264,7 @@ export function registerLiveAgent(chatId: string, agent: Agent): void {
  *  never landed in the persisted record). */
 export interface UserSteerEntry {
 	message: LhMessage;
-	handedTo?: Agent;
+	handedTo?: TurnAgent;
 }
 
 /** The steer route's live hand-off (composer steering, 2026-10-03).
@@ -310,7 +310,7 @@ export function unregisterLiveAgent(chatId: string): void {
 
 /** Restore exact registry objects after native drain but before dispatch.
  * The vehicle is disposable; result ownership/promises are not. */
-export function restoreUncommittedAutomatic(chatId: string, agent: Agent, automaticIds: ReadonlySet<string>, retainedIds: ReadonlySet<string>): void {
+export function restoreUncommittedAutomatic(chatId: string, agent: TurnAgent, automaticIds: ReadonlySet<string>, retainedIds: ReadonlySet<string>): void {
 	const s = state();
 	s.automaticDeferred.add(agent);
 	for (const entry of s.queues.get(chatId) ?? []) {
