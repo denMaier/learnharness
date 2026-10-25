@@ -43,9 +43,12 @@ import {
 	extractionEnabled,
 	graphToolsEnabled,
 	resolveConversationSpec,
+	resolveRoleHarness,
 	resolveRoleSpec,
 } from "../core/settings-resolution.ts";
-import { modelsNotConfigured, providerKeyMissing as providerKeyMissingEnvelope, type ProviderKeyMissing } from "../core/settings.ts";
+import { claudeCodeEngine } from "./harness/claude-code-subagent.ts";
+import type { BackgroundEngine } from "../agent/subagents/pi-run.ts";
+import { modelsNotConfigured, providerKeyMissing as providerKeyMissingEnvelope, type ModelSlotName, type ProviderKeyMissing } from "../core/settings.ts";
 import { beginTurn, endTurn } from "./turn-liveness.ts";
 import { applyParkedDismissal } from "./dismissal-park.ts";
 import { registerTurn, unregisterTurn } from "./turn-runs.ts";
@@ -100,7 +103,7 @@ const jobRunner = createJobRunner({
 	// layer may not read the key store); a missing key refuses the spawn
 	// with the 503-envelope family instead of dying mid-run.
 	providerKeyMissing: (provider, tier) =>
-		providerKeyPresent(provider) ? null : providerKeyMissingEnvelope(provider, [tier]),
+		backgroundKeyRefusal(provider, tier),
 	// Search port wave (2026-09-20): the researcher's web_search runs on the
 	// injected port — resolved FRESH per job (key rotations land immediately).
 	// null = honestly unavailable; the dispatch-level drop (below) uses the
@@ -122,7 +125,7 @@ export const extraction = createExtractionPipeline({
 	// the job runner gets — a stage engine whose provider key is gone
 	// refuses BEFORE any batch runs (the typed throw), never mid-run.
 	providerKeyMissing: (provider, tier) =>
-		providerKeyPresent(provider) ? null : providerKeyMissingEnvelope(provider, [tier]),
+		backgroundKeyRefusal(provider, tier),
 });
 
 
@@ -141,9 +144,21 @@ setTurnRunner(async (chatId, input) => {
  *  the chain (role override → slot → NOTHING) may end empty, and undefined
  *  flows through to the per-need refusal gates (runner/extraction), read
  *  FRESH so a settings PUT between dispatch and spawn lands. */
-function resolveEngine(role: ModelRole): PiEngine | undefined {
-	const spec = resolveRoleSpec(role, stores.settingsStore.readSettings());
+function resolveEngine(role: ModelRole): BackgroundEngine | undefined {
+	const record = stores.settingsStore.readSettings();
+	// A harness slot (Phase 4) sends the role to Claude Code; an explicit
+	// per-role pi override still wins (resolveRoleHarness).
+	const harness = resolveRoleHarness(role, record);
+	if (harness) return claudeCodeEngine(harness);
+	const spec = resolveRoleSpec(role, record);
 	return spec ? piEngineForSpec(spec) : undefined;
+}
+
+/** The key-presence refusal for a background engine's provider. A harness
+ *  needs no API key — it runs on the learner's own login. */
+function backgroundKeyRefusal(provider: string, tier: ModelSlotName): ProviderKeyMissing | null {
+	if (provider === CLAUDE_CODE_PROVIDER) return null;
+	return providerKeyPresent(provider) ? null : providerKeyMissingEnvelope(provider, [tier]);
 }
 
 setJobRespawn((jobId) => void jobRunner.runJob(jobId));
@@ -219,7 +234,7 @@ function claudeCodeAgent(
 	session: HarnessSession | undefined,
 ): TurnAgent {
 	return new ClaudeCodeAgent({
-		chatId,
+		mcpScope: { kind: "turn", chatId, role },
 		role,
 		messages: opts.messages ?? [],
 		systemPrompt: composeInstructions(role, opts.promptSwitches),
@@ -304,7 +319,12 @@ export async function handleChatInput(
 	// subscription request cycle and LH compaction (the harness manages its
 	// own context window) do not apply; everything after these gates —
 	// appends, liveness, write-ahead persist, steers, settle — is shared.
-	const harness = record.settings?.harness;
+	// A chat with no conversation pin of its own follows a harness strong
+	// slot (Phase 4) — the same fallback a settings-less chat takes to the
+	// strong slot's pi model.
+	const harness =
+		record.settings?.harness ??
+		(record.settings?.model ? undefined : resolveRoleHarness("teacher", stores.settingsStore.readSettings()));
 	const conversation = harness ? undefined : resolveConversationSpec(record.settings, effective.models.strong);
 	if (!harness && !conversation) {
 		const envelope = modelsNotConfigured(["strong"]);

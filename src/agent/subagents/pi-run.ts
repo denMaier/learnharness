@@ -18,11 +18,33 @@ import type { ModelRole } from "../../../config.ts";
  * `signal.aborted` early-return keeps working unchanged.
  */
 
+/**
+ * A background engine that is not a pi model but an external harness
+ * (docs/harness-orchestration.md Phase 4 — Claude Code first). The agent
+ * layer never imports the harness drivers (they live in src/server); the
+ * composition root builds this object with its `run` closed over the
+ * driver, and runSubagent hands the whole run to it. `model` carries the
+ * provider-qualified stamp coordinates the usage code reads.
+ */
+export interface HarnessEngine {
+	kind: "harness";
+	model: { provider: string; id: string };
+	run(tools: AgentTool<any, any>[], opts: SubagentRunOptions): Promise<SubagentRunResult>;
+}
+
+/** What a background role resolves to: a pi model or a harness. */
+export type BackgroundEngine = PiEngine | HarnessEngine;
+
+export function isHarnessEngine(engine: BackgroundEngine | undefined): engine is HarnessEngine {
+	return (engine as HarnessEngine | undefined)?.kind === "harness";
+}
+
 export interface SubagentRunOptions {
 	/** The role whose engine (model + thinking level) this run uses. */
 	role: ModelRole;
-	/** Test seam: a scripted engine replaces the role's production one. */
-	engine?: PiEngine;
+	/** The resolved engine — a pi model, a harness, or (tests) a scripted
+	 *  one; absent = the role's production pi engine. */
+	engine?: BackgroundEngine;
 	systemPrompt: string;
 	/** Initial transcript (continuation semantics: ends user / toolResult). */
 	messages?: AgentMessage[];
@@ -61,6 +83,7 @@ export function subagentEngine(role: ModelRole, override?: PiEngine): PiEngine {
 }
 
 export async function runSubagent(tools: AgentTool<any, any>[], opts: SubagentRunOptions): Promise<SubagentRunResult> {
+	if (isHarnessEngine(opts.engine)) return opts.engine.run(tools, opts);
 	const engine = subagentEngine(opts.role, opts.engine);
 	let turns = 0;
 	// Debug recorder (owner, 2026-10-04): raw provider events per job run.

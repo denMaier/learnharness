@@ -30,7 +30,7 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { AUTH_PROVIDER_KEYS } from "./auth-keys.ts";
 import type { ModelRole } from "../../config.ts";
-import type { ChatSettings } from "./contracts/chat.ts";
+import type { ChatSettings, HarnessSettings } from "./contracts/chat.ts";
 import type { SearchEngineId } from "./search.ts";
 
 /** The schema version this code understands. Bump ONLY for breaking shape
@@ -193,7 +193,16 @@ export interface ModelSlot {
 	model?: { provider: string; id: string };
 	/** The thinking budget swap. */
 	thinkingLevel?: ThinkingLevel;
+	/** OR run the tier on an external harness instead of a pi model
+	 *  (docs/harness-orchestration.md Phase 4): strong/cheap only — the
+	 *  vision tier's jobs drive single model calls and need a pi model.
+	 *  Exclusive with `model`. A harness strong slot also makes new chats
+	 *  start on the harness. */
+	harness?: HarnessSettings;
 }
+
+/** The tiers a harness may stand in for (vision needs a pi model). */
+export const HARNESS_SLOTS = ["strong", "cheap"] as const;
 
 /** The `models` settings section (owner decision 2026-09-20: a dedicated
  *  section — slots are engine-level choices, not one session's). All slots
@@ -211,7 +220,8 @@ export interface ModelsSettings {
  *  models section carries a model in every slot. Thinking levels stay
  *  optional (absent = the resolved tier's budget). */
 export function slotsConfigured(models: ModelsSettings | undefined): boolean {
-	return Boolean(models?.strong?.model && models?.cheap?.model && models?.vision?.model);
+	const set = (slot: ModelSlot | undefined) => Boolean(slot?.model || slot?.harness);
+	return set(models?.strong) && set(models?.cheap) && Boolean(models?.vision?.model);
 }
 
 /** Which slot a role draws from (model slots wave, 2026-09-20). Includes the

@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
 
 /**
  * MCP SESSION TOKENS (harness orchestration Phase 1, docs/harness-orchestration.md):
@@ -13,8 +14,10 @@ import { randomBytes } from "node:crypto";
  * - `prober` / `teacher` / `practice`: one chat's turn toolkit (the same
  *   registry the in-process agent gets — chat-handler's toolsForRole);
  * - `graph`: the read-only outside-agent scope (list_sessions /
- *   list_propositions / find over the learner's knowledge graph), not tied
- *   to a chat.
+ *   list_propositions over the learner's knowledge graph), not tied to a
+ *   chat;
+ * - `tools`: a background agent's registry, carried by the token itself
+ *   (researcher, demo-builder, extractor, auditor on a harness).
  *
  * The registry lives on globalThis (the module-instance idiom the turn and
  * wake registries use) so Next's per-entry module copies share one table.
@@ -24,7 +27,10 @@ export type McpRole = "prober" | "teacher" | "practice";
 
 export type McpScope =
 	| { kind: "turn"; chatId: string; role: McpRole }
-	| { kind: "graph" };
+	| { kind: "graph" }
+	/** A background agent's own registry (Phase 4): the run that minted the
+	 *  token hands over exactly the tools it would give a pi loop. */
+	| { kind: "tools"; label: string; tools: Record<string, AgentTool<any>> };
 
 interface TokenEntry {
 	scope: McpScope;

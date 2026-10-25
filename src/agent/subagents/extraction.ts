@@ -12,7 +12,7 @@ import {
 	type ModelSlotName,
 	type ProviderKeyMissing,
 } from "../../core/settings.ts";
-import type { PiEngine } from "../models.ts";
+import type { BackgroundEngine } from "./pi-run.ts";
 import { runSubagent } from "./pi-run.ts";
 import { withBgLlmSlot } from "./bg-llm-semaphore.ts";
 import type {
@@ -464,7 +464,7 @@ export function sourceDigest(graph: DerivedGraph, sourceId: string): string {
  *  anchor boundary: every submitted proposition's messageId must name
  *  one of them (validateSessionAnchors at the submit seam). */
 function runExtractor(
-	engine: PiEngine | undefined,
+	engine: BackgroundEngine | undefined,
 	sourceId: string,
 	prompt: string,
 	existingIds: ReadonlySet<string>,
@@ -501,7 +501,7 @@ function runExtractor(
  *  the BASE wire (no messageId: notes have no passages, and a stray one
  *  is stripped at the fill seam). */
 function runNotesExtractor(
-	engine: PiEngine | undefined,
+	engine: BackgroundEngine | undefined,
 	sourceId: string,
 	prompt: string,
 	existingIds: ReadonlySet<string>,
@@ -570,7 +570,7 @@ Include the "links" field even when empty — "links": [] when nothing links. NE
  *  identical once attribution died). An agentic loop: graph-exploration
  *  tools plus the one submit call. */
 function runAuditor(
-	engine: PiEngine | undefined,
+	engine: BackgroundEngine | undefined,
 	sourceId: string,
 	prompt: string,
 	signal: AbortSignal | undefined,
@@ -706,14 +706,14 @@ export function abortExtraction(chatId: string): boolean {
 export interface ExtractionModels {
 	/** Test seam: a scripted engine per stage — checked FIRST, ahead of the
 	 *  engineFor chain (production wires no direct values). */
-	extractor?: PiEngine;
-	auditor?: PiEngine;
+	extractor?: BackgroundEngine;
+	auditor?: BackgroundEngine;
 	/** Settings-resolved engine per role — the same slot treatment the
 	 *  job runner got, read FRESH per stage call (a settings PUT between
 	 *  stages lands). BYOK (owner, 2026-09-22): the chain (role override →
 	 *  slot → NOTHING) may end EMPTY → undefined; the front doors refuse
 	 *  with ModelsNotConfiguredError before any stage runs. */
-	engineFor?: (role: ModelRole) => PiEngine | undefined;
+	engineFor?: (role: ModelRole) => BackgroundEngine | undefined;
 	/** Key-presence gate (provider-key interlude, 2026-09-25): given a
 	 *  stage engine's provider + the role's slot tier, the injected check
 	 *  returns the refusal envelope when the provider's key is missing
@@ -791,14 +791,14 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 	// stage call server-side) — the job runner's exact treatment. undefined
 	// = the BYOK chain came up empty; the front-door guards turn that into
 	// an honest refusal.
-	const stageEngine = (role: ModelRole, override?: PiEngine): PiEngine | undefined =>
+	const stageEngine = (role: ModelRole, override?: BackgroundEngine): BackgroundEngine | undefined =>
 		override ?? deps.engineFor?.(role);
 	/** The per-need refusal guard: which slot tiers the pipeline's stages
 	 *  found unset (test values count as configured — they ARE engines),
 	 *  and whether a configured stage's provider key is gone (provider-key
 	 *  interlude, 2026-09-25) — both refuse BEFORE any batch runs. */
 	function refuseIfStagesUnready(): void {
-		const stages: readonly [ModelRole, PiEngine | undefined][] = [
+		const stages: readonly [ModelRole, BackgroundEngine | undefined][] = [
 			["extractor", stageEngine("extractor", deps.extractor)],
 			["auditor", stageEngine("auditor", deps.auditor)],
 		];

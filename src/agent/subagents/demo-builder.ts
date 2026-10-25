@@ -2,7 +2,7 @@ import { Type } from "typebox";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { Usage } from "@earendil-works/pi-ai";
 import { serverExecute } from "../tool-execute.ts";
-import type { PiEngine } from "../models.ts";
+import type { BackgroundEngine } from "./pi-run.ts";
 import { runSubagent } from "./pi-run.ts";
 import type { DemoResult } from "../../core/contracts.ts";
 import { getHeadless, type DemoRunResult, type HeadlessApi } from "./headless.ts";
@@ -32,7 +32,7 @@ export interface DemoBuilderInput {
 
 export interface DemoBuilderOptions {
 	/** Test seam: scripted engine; production uses the demoBuilder role. */
-	engine?: PiEngine;
+	engine?: BackgroundEngine;
 	headless?: HeadlessApi;
 	/** Max agent steps (each write/run/fix is one step). Default 24 ≈ 6 cycles. */
 	maxSteps?: number;

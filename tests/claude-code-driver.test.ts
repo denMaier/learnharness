@@ -161,9 +161,10 @@ function claudeDriver(
 	extra: { session?: HarnessSessionRef; role?: "prober" | "teacher" } = {},
 ): NonNullable<Parameters<typeof handleChatInput>[2]> {
 	return (opts) => {
+		const role = extra.role ?? (opts.teaching ? "teacher" : "prober");
 		const agent = new ClaudeCodeAgent({
-			chatId: opts.chatId!,
-			role: extra.role ?? (opts.teaching ? "teacher" : "prober"),
+			mcpScope: { kind: "turn", chatId: opts.chatId!, role },
+			role,
 			messages: opts.messages ?? [],
 			systemPrompt: "LH TEST PROMPT",
 			model: "haiku",

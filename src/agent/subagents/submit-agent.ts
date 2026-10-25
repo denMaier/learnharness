@@ -12,7 +12,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { TSchema } from "typebox";
 import { invalidInputResult, toToolResult } from "../tool-execute.ts";
 import type { ModelRole } from "../../../config.ts";
-import type { PiEngine } from "../models.ts";
+import type { BackgroundEngine } from "./pi-run.ts";
 import { runSubagent } from "./pi-run.ts";
 import { healToolRecord } from "../tools/heal.ts";
 import { healEncodedArguments } from "../../core/argument-heal.ts";
@@ -55,7 +55,7 @@ export async function runSubmitAgent<T>(opts: {
 	fill: (input: any) => T;
 	systemPrompt: string;
 	prompt: string;
-	engine: PiEngine | undefined;
+	engine: BackgroundEngine | undefined;
 	signal: AbortSignal | undefined;
 	onStep: (usage: Usage, model: string, step: number, finishReason: string, tools: string) => void;
 	neverSubmitted: string;

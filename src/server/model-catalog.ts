@@ -296,6 +296,10 @@ export function clampModelsLevels(settings: ModelsSettings): ModelsSettings {
 	const out: ModelsSettings = {};
 	for (const name of MODEL_SLOTS) {
 		const slot = settings[name];
+		if (slot?.harness) {
+			out[name] = slot; // nothing to clamp: the harness owns its budget
+			continue;
+		}
 		if (!slot?.model) continue;
 		out[name] =
 			slot.thinkingLevel !== undefined

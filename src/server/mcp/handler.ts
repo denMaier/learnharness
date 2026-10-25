@@ -37,6 +37,7 @@ const SERVER_INFO = { name: "learnharness", version: "1" } as const;
 /** The tools a scope may see — the scope decides, never the request. */
 function toolsForScope(scope: McpScope): Record<string, AgentTool<any>> {
 	if (scope.kind === "graph") return proberGraphTools({ chatStore: stores.chatStore, graphStore: stores.graphStore });
+	if (scope.kind === "tools") return scope.tools;
 	return toolsForRole(scope.chatId, scope.role);
 }
 

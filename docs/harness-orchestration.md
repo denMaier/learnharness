@@ -163,6 +163,48 @@ started a new teacher session, which called `plan_init`. Two findings from that 
   an installed `claude`.
 - `next dev -p` alone does not set `PORT`. Set `PORT` (or `LH_MCP_URL`) when the dev port isn't 3000.
 
+**Caching (verified from the live run's usage).**
+- Each resumed turn reads the whole earlier prefix from cache and writes only the new messages.
+- Claude Code writes with 1-hour retention (`ephemeral_1h`), recorded as `cacheWrite1h`.
+- One cold write per new session (the probe→teach switch), per model change, or per pause
+  longer than an hour.
+- Side effect: Claude Code snapshots the system prompt per session, so an LH prompt-override
+  edit mid-lesson takes effect from the next session, not the current one.
+
+## Phase 4: background agents on Claude Code (as built, 2026-10-25)
+
+**Selecting it.** A model slot can name a harness instead of a model:
+`PUT /api/settings/models {"strong": {"harness": {...}}, "cheap": {"harness": {"driver": "claude-code", "model": "haiku"}}}`.
+- Only `strong` and `cheap` may (`HARNESS_SLOTS`). A harness slot takes no model or thinking level.
+- Every role on a harness slot runs on Claude Code. An explicit per-role pi override still
+  wins (`resolveRoleHarness`).
+- A harness `strong` slot stamps new chats with `settings.harness`, and is the fallback for
+  chats with no conversation pin.
+- `slotsConfigured` counts harness slots. `vision` still needs a pi model.
+
+**Seam.** `runSubagent` (agent layer) takes a `BackgroundEngine = PiEngine | HarnessEngine`.
+A `HarnessEngine` carries its own `run`, built by the composition root
+(`claudeCodeEngine`), so the agent layer still never imports server code. The tool registry
+rides the run's MCP token (`McpScope` kind `tools`), so the background agent's AgentTools run
+in-process exactly as on pi; Claude only chooses the calls. Contract parity with `runSubagent`:
+- `maxTurns` ends the run normally;
+- `shouldStop` is checked after each tool-result batch (the extractor's stop-after-submit);
+- the step and usage callbacks fire per message;
+- an abort throws `AbortError`.
+
+Background runs keep no Claude session (`persistSession: false`). Key-presence refusals skip
+`claude-code`.
+
+**Covered roles.** researcher, demoBuilder, extractor and auditor, everything on
+`runSubagent`/`runSubmitAgent`. visualMaker and pdfReader drive single model calls by hand
+and refuse honestly on a harness engine (`piOnly` in `runner.ts`). Validation already keeps
+them off one, because `vision` can't be a harness slot.
+
+**Live-verified.** With no API key configured at all: `POST /api/graph/import` of a short
+note ran the extractor and auditor on Claude Code (Haiku) in about 20 s, giving 10
+propositions and 4 sound chains. A new chat was stamped with the harness. Not live-verified:
+researcher (needs a search key) and demo-builder.
+
 ## Risks
 
 - **Prompt fidelity** under a harness: measure with a golden-lesson eval before trusting it.

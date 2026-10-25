@@ -3,7 +3,7 @@ import type { Usage } from "@earendil-works/pi-ai";
 import { createWebTools } from "../tools/web.ts";
 import { createPdfReadTools } from "../tools/pdf-read.ts";
 import type { SearchProvider } from "../../core/search.ts";
-import type { PiEngine } from "../models.ts";
+import type { BackgroundEngine } from "./pi-run.ts";
 import { runSubagent } from "./pi-run.ts";
 
 /**
@@ -68,7 +68,7 @@ Numbered findings with inline source citations:
 What couldn't be answered. Suggested next steps.`;
 
 export interface ResearcherRunOptions {
-	engine?: PiEngine;
+	engine?: BackgroundEngine;
 	/** The search seam (search port wave, 2026-09-20): resolves the LIVE
 	 *  provider per call, null = honestly unavailable (the web_search tool
 	 *  reports that in its output — no crash, no silent fallback). Absent

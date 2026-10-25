@@ -23,7 +23,7 @@ import type {
 	ModelsSettings,
 	RoleModelOverride,
 } from "../core/settings.ts";
-import { BACKGROUND_MODEL_ROLES, COMPACTION_THRESHOLD_FLOOR, EXTRACTION_CHUNK_TOKENS_FLOOR, MODEL_SLOTS } from "../core/settings.ts";
+import { BACKGROUND_MODEL_ROLES, COMPACTION_THRESHOLD_FLOOR, EXTRACTION_CHUNK_TOKENS_FLOOR, HARNESS_SLOTS, MODEL_SLOTS } from "../core/settings.ts";
 import { WRITABLE_TOOL_KEYS } from "../core/pending.ts";
 
 /** Parsed-or-rejected — `ok: false` carries the 400's error message. */
@@ -346,6 +346,21 @@ export function parseModelsSettingsBody(body: unknown): SettingsBodyResult<Model
 		const known = MODEL_SLOTS as readonly string[];
 		if (!known.includes(key)) {
 			return { ok: false, error: `unknown slot "${key}" (supported: ${known.join(", ")})` };
+		}
+		// A harness slot (docs/harness-orchestration.md Phase 4):
+		// {harness: {driver, model?}} instead of a model — strong/cheap only.
+		const slotRaw = asRecord(raw[key]);
+		if (slotRaw && slotRaw.harness !== undefined) {
+			if (!(HARNESS_SLOTS as readonly string[]).includes(key)) {
+				return { ok: false, error: `slot "${key}" cannot run on a harness (supported: ${HARNESS_SLOTS.join(", ")})` };
+			}
+			if (Object.keys(slotRaw).some((k) => k !== "harness")) {
+				return { ok: false, error: `slot "${key}": a harness slot takes no model or thinkingLevel` };
+			}
+			const parsedHarness = parseSettingsBody({ harness: slotRaw.harness });
+			if (!parsedHarness.ok) return { ok: false, error: `slot "${key}": ${parsedHarness.error}` };
+			settings[key as (typeof MODEL_SLOTS)[number]] = { harness: parsedHarness.settings.harness! };
+			continue;
 		}
 		const parsed = parseRoleOverride(raw[key], key);
 		if (!parsed.ok) return { ok: false, error: parsed.error };

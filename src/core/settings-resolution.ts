@@ -24,7 +24,7 @@
 
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ModelRole } from "../../config.ts";
-import type { ChatSettings } from "./contracts/chat.ts";
+import type { ChatSettings, HarnessSettings } from "./contracts/chat.ts";
 import type { SearchEngineId } from "./search.ts";
 import {
 	BACKGROUND_MODEL_ROLES,
@@ -124,6 +124,18 @@ export function resolveRoleSpec(role: ModelRole, record: UserSettings | null): E
 	const bg = BACKGROUND_MODEL_ROLES as readonly string[];
 	const override = bg.includes(role) ? record?.agent?.models?.[role as BackgroundModelRole] : undefined;
 	return resolveModelSpec(role, override, record?.models);
+}
+
+/** The harness a role runs on, if any (docs/harness-orchestration.md
+ *  Phase 4): an explicit per-role pi model override wins; otherwise the
+ *  role's slot decides — a harness slot sends every role of its tier to
+ *  the harness. undefined = the role runs on pi (resolveRoleSpec). */
+export function resolveRoleHarness(role: ModelRole, record: UserSettings | null): HarnessSettings | undefined {
+	const bg = BACKGROUND_MODEL_ROLES as readonly string[];
+	const override = bg.includes(role) ? record?.agent?.models?.[role as BackgroundModelRole] : undefined;
+	if (override?.model) return undefined;
+	const slot = record?.models?.[ROLE_SLOT[role]];
+	return slot?.model ? undefined : slot?.harness;
 }
 
 /** Resolve one slot to its configured view, or null when the tier holds

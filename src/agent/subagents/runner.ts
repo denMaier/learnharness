@@ -1,4 +1,5 @@
 import type { PiEngine } from "../models.ts";
+import { isHarnessEngine, type BackgroundEngine } from "./pi-run.ts";
 import type { SearchProvider } from "../../core/search.ts";
 import {
 	accumulateJobUsage,
@@ -78,7 +79,7 @@ export interface JobRunnerDeps {
 	 *  (below) still win. BYOK (owner, 2026-09-22): the chain may end
 	 *  EMPTY → undefined; runJob then refuses the spawn honestly instead
 	 *  of guessing a model. */
-	engineFor?: (role: ModelRole) => PiEngine | undefined;
+	engineFor?: (role: ModelRole) => BackgroundEngine | undefined;
 	/** The search seam (search port wave, 2026-09-20): resolves the LIVE
 	 *  provider fresh per job — server/search.ts composition injected by
 	 *  the wiring; null = honestly unavailable (the researcher's web_search
@@ -124,6 +125,14 @@ const KIND_ROLE: Record<JobKind, ModelRole> = {
 	pdf: "pdfReader",
 };
 
+/** The vision jobs (visual-maker, pdf-reader) drive single model calls by
+ *  hand and need a pi vision model — a harness engine refuses honestly
+ *  inside the job's own error path (docs/harness-orchestration.md). */
+function piOnly(engine: BackgroundEngine | undefined, what: string): PiEngine | undefined {
+	if (isHarnessEngine(engine)) throw new Error(`${what} needs an API model in the vision slot; it cannot run on ${engine.model.provider} yet.`);
+	return engine;
+}
+
 export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 	const { chatStore, jobStore, deliver } = deps;
 
@@ -131,7 +140,7 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 	 * then writes through the job store so the poll sees progress). */
 	const usageTotals = new Map<string, JobUsage>();
 
-	function makeLoopContext(jobId: string, engine: PiEngine): LoopContext {
+	function makeLoopContext(jobId: string, engine: BackgroundEngine): LoopContext {
 		const chatId = jobStore.getJob(jobId)?.chatId;
 		// Provider-qualified stamp: the engine's actual model — the only
 		// thing that ran (BYOK: no config-pin fallback stamps exist).
@@ -167,7 +176,7 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 	 *  tests swap scripted engines without touching deps), then the injected
 	 *  settings-resolved engineFor. undefined = the BYOK chain came up
 	 *  empty (owner, 2026-09-22) — runJob refuses below, honestly. */
-	function pickEngine(kind: JobKind): PiEngine | undefined {
+	function pickEngine(kind: JobKind): BackgroundEngine | undefined {
 		const testOverride: Record<string, { current?: PiEngine } | undefined> = {
 			researcher: researchModelOverride,
 			demoBuilder: demoModelOverride,
@@ -179,7 +188,7 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 
 	const KIND_RUNNERS: Record<
 		JobKind,
-		(jobId: string, engine: PiEngine, input: JobToolInput | undefined, loop: LoopContext) => Promise<void>
+		(jobId: string, engine: BackgroundEngine, input: JobToolInput | undefined, loop: LoopContext) => Promise<void>
 	> = {
 		research: (jobId, engine, input, loop) => runResearchJob(jobId, engine, input, loop),
 		demo: (jobId, engine, input, loop) => runDemoJob(jobId, engine, input, loop),
@@ -334,7 +343,7 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 
 	async function runResearchJob(
 		jobId: string,
-		model: PiEngine | undefined,
+		model: BackgroundEngine | undefined,
 		passedInput: JobToolInput | undefined,
 		loop: LoopContext,
 	): Promise<void> {
@@ -399,7 +408,7 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 
 	async function runDemoJob(
 		jobId: string,
-		model: PiEngine | undefined,
+		model: BackgroundEngine | undefined,
 		passedInput: JobToolInput | undefined,
 		loop: LoopContext,
 	): Promise<void> {
@@ -436,7 +445,7 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 
 	async function runVisualJob(
 		jobId: string,
-		model: PiEngine | undefined,
+		model: BackgroundEngine | undefined,
 		passedInput: JobToolInput | undefined,
 		loop: LoopContext,
 	): Promise<void> {
@@ -452,7 +461,7 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 			const result = await runVisualMaker(
 				{ brief },
 				{
-					engine: model,
+					engine: piOnly(model, "Drawing a figure"),
 					abortSignal: loop.abortSignal,
 					chatId: loop.chatId,
 					onUsage: (usage) => loop.onUsage(piUsageToStep(usage)),
@@ -474,7 +483,7 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 
 	async function runPdfJob(
 		jobId: string,
-		model: PiEngine | undefined,
+		model: BackgroundEngine | undefined,
 		passedInput: JobToolInput | undefined,
 		loop: LoopContext,
 	): Promise<void> {
@@ -491,7 +500,7 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 			const result = await runPdfReaderAgent(
 				{ path, question },
 			{
-				engine: model,
+				engine: piOnly(model, "Reading a PDF"),
 				abortSignal: loop.abortSignal,
 				chatId: loop.chatId,
 				onUsage: (usage) => loop.onUsage(piUsageToStep(usage)),

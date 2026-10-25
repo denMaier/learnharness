@@ -5,7 +5,7 @@ import type { TurnAgent } from "../../agent/turn-agent.ts";
 import { QUESTION_TOOLS } from "../../core/pending.ts";
 import { toLlmMessages } from "../../core/native-messages.ts";
 import { takeMcpDetails } from "../mcp/details.ts";
-import { mintMcpToken, revokeMcpToken, type McpRole } from "../mcp/tokens.ts";
+import { mintMcpToken, revokeMcpToken, type McpRole, type McpScope } from "../mcp/tokens.ts";
 
 /**
  * THE CLAUDE CODE DRIVER (harness orchestration Phase 2,
@@ -63,11 +63,23 @@ export type QueryFn = (params: { prompt: AsyncIterable<SDKUserMessage>; options:
 export const claudeCodeQuerySeam: { fn?: QueryFn } = {};
 
 export interface ClaudeCodeAgentOptions {
-	chatId: string;
-	role: McpRole;
+	/** What the run's MCP token grants: a chat turn's role toolkit, or a
+	 *  background agent's own registry. */
+	mcpScope: McpScope;
+	/** The conversation role, for session resume matching (chat turns only). */
+	role?: McpRole;
 	messages: AgentMessage[];
-	/** The composed LH prompt for the role (composeInstructions). */
+	/** The composed LH prompt (composeInstructions, or a sub-agent's prompt). */
 	systemPrompt: string;
+	/** The system-prompt appendix naming the tools (default: the chat note). */
+	toolNote?: string;
+	/** Stop after a batch of tool results when this says so (pi's
+	 *  finishTurn / shouldStop). Default: the turn-ending tools rule. */
+	stopAfterToolResults?: (assistant: AssistantMessage | undefined, results: ToolResultMessage[], posed: boolean) => boolean;
+	/** Cap on Claude's agentic turns; reaching it ends the run normally (pi semantics). */
+	maxTurns?: number;
+	/** Keep Claude's session on disk for resume (chat turns). Default true. */
+	persistSession?: boolean;
 	/** Claude model alias or id ("sonnet", "opus", "haiku", a full id); absent = Claude Code's default. */
 	model?: string;
 	/** The chat's current Claude session, if any. */
@@ -143,6 +155,10 @@ function usageOf(raw: unknown): Usage {
 	usage.output = n("output_tokens");
 	usage.cacheRead = n("cache_read_input_tokens");
 	usage.cacheWrite = n("cache_creation_input_tokens");
+	// Claude Code writes with 1h retention; pi's Usage carries that split
+	// as a subset of cacheWrite.
+	const creation = (u.cache_creation ?? {}) as Record<string, unknown>;
+	if (typeof creation.ephemeral_1h_input_tokens === "number") usage.cacheWrite1h = creation.ephemeral_1h_input_tokens;
 	usage.totalTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
 	return usage;
 }
@@ -398,11 +414,13 @@ export class ClaudeCodeAgent implements TurnAgent {
 		this.update(p);
 	}
 
-	/** Tool results Claude Code returns to the model. True = a turn-ending
-	 *  tool (a question, a practice problem) was posed. */
+	/** Tool results Claude Code returns to the model. True = the run should
+	 *  stop here (default rule: a turn-ending tool — a question, a practice
+	 *  problem — was posed; a sub-agent passes its own rule). */
 	private onToolResults(content: unknown): boolean {
 		if (!Array.isArray(content)) return false;
 		let posed = false;
+		const results: ToolResultMessage[] = [];
 		for (const part of content as Array<Record<string, unknown>>) {
 			if (part.type !== "tool_result") continue;
 			if (this.partial) this.finalize();
@@ -424,8 +442,12 @@ export class ClaudeCodeAgent implements TurnAgent {
 				timestamp: Date.now(),
 			};
 			this.append(result);
+			results.push(result);
 		}
-		return posed;
+		const stop = this.opts.stopAfterToolResults;
+		if (!stop) return posed;
+		const lastAssistant = [...this.state.messages].reverse().find((m) => (m as { role?: string }).role === "assistant") as AssistantMessage | undefined;
+		return stop(lastAssistant, results, posed);
 	}
 
 	private async loadQuery(): Promise<QueryFn> {
@@ -438,9 +460,9 @@ export class ClaudeCodeAgent implements TurnAgent {
 	async continue(): Promise<void> {
 		this.aborted = false;
 		this.emit({ type: "agent_start" });
-		const { chatId, role } = this.opts;
-		const resume = this.opts.session && this.opts.session.role === role ? this.opts.session.sessionId : undefined;
-		const token = mintMcpToken({ kind: "turn", chatId, role });
+		const { role } = this.opts;
+		const resume = role && this.opts.session && this.opts.session.role === role ? this.opts.session.sessionId : undefined;
+		const token = mintMcpToken(this.opts.mcpScope);
 		const input = (this.input = new InputQueue<SDKUserMessage>());
 		input.push(userInput(renderTurnPrompt(this.state.messages, resume !== undefined)));
 		let sessionReported = false;
@@ -453,7 +475,9 @@ export class ClaudeCodeAgent implements TurnAgent {
 					...(this.opts.model ? { model: this.opts.model } : {}),
 					...(resume ? { resume } : {}),
 					...(this.opts.claudePath ? { pathToClaudeCodeExecutable: this.opts.claudePath } : {}),
-					systemPrompt: `${this.opts.systemPrompt}\n\n---\n\n${CLAUDE_CODE_TOOL_NOTE}`,
+					systemPrompt: `${this.opts.systemPrompt}\n\n---\n\n${this.opts.toolNote ?? CLAUDE_CODE_TOOL_NOTE}`,
+					...(this.opts.maxTurns ? { maxTurns: this.opts.maxTurns } : {}),
+					...(this.opts.persistSession === false ? { persistSession: false } : {}),
 					tools: [],
 					mcpServers: { [MCP_SERVER]: { type: "http", url: this.opts.mcpUrl, headers: { Authorization: `Bearer ${token}` } } },
 					strictMcpConfig: true,
@@ -478,7 +502,7 @@ export class ClaudeCodeAgent implements TurnAgent {
 				if (next === "woken" || this.aborted) break;
 				if (next.done) break;
 				const message = next.value as SDKMessage & Record<string, unknown>;
-				if (!sessionReported && typeof message.session_id === "string") {
+				if (!sessionReported && role && typeof message.session_id === "string") {
 					sessionReported = true;
 					this.opts.onSession?.({ sessionId: message.session_id, role });
 				}
@@ -495,6 +519,8 @@ export class ClaudeCodeAgent implements TurnAgent {
 					}
 				} else if (message.type === "result") {
 					this.finalize();
+					// pi's maxTurns ends a run normally; so does the SDK's cap here.
+					if (message.subtype === "error_max_turns") break;
 					if (message.subtype !== "success" && !this.aborted) {
 						this.appendError(`Claude Code ended the turn: ${String(message.subtype)}`);
 						break;

@@ -39,6 +39,10 @@ export async function POST(req: Request) {
 			model: { provider: strong.model.provider, id: strong.model.id },
 			thinkingLevel: strong.thinkingLevel,
 		});
+	} else if (strong?.harness) {
+		// A harness strong slot (docs/harness-orchestration.md Phase 4): the
+		// newborn runs its conversation on the harness, stamped like a model.
+		stores.chatStore.saveSettings(chat.id, { harness: strong.harness });
 	}
 	// The session's map context (owner, 2026-10-04): the picked
 	// propositions ride the CREATION — message[0] is a graph-context
