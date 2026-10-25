@@ -44,3 +44,7 @@ export { runPiTurn, piTurnResponse, type PiTurnHandle, type PiTurnSpec } from ".
 export * from "./observability.ts";
 export * from "./model-catalog.ts";
 export { sessionCost } from "./pricing.ts";
+// The LearnHarness MCP server (harness orchestration Phase 1): the route
+// handler + the token registry the harness drivers mint scoped tokens from.
+export { handleMcpRequest } from "./mcp/handler.ts";
+export { MCP_TOKEN_MAX_MS, mintMcpToken, revokeMcpToken, revokeMcpTokensForChat, type McpScope } from "./mcp/tokens.ts";

@@ -58,8 +58,8 @@ app/api/mcp/route.ts → src/server/mcp/  wraps the SAME AgentTool registries   
    satisfies it structurally, with no wrapper.
 2. `runPiTurn`, `PiTurnSpec.agent`, `registerLiveAgent`/`unregisterLiveAgent` and the handler's
    `TeachingAgent` plumbing take `TurnAgent` instead of `Agent`.
-3. Name the turn-engine choice in one place, next to `piEngineFor`: `turnAgentFor(conversation,
-   opts)` returns the pi agent today. This is the single file Phase 2 touches to add Claude.
+3. ~~Name the turn-engine choice in a `turnAgentFor` factory.~~ Deferred to Phase 2: with a
+   single engine it would only add indirection. The factory lands together with the Claude driver.
 4. Gate: the full suite passes unchanged and the diff touches only types plus one factory. Add a
    test that a scripted fake `TurnAgent` (not pi) drives `handleChatInput` end to end:
    persist, a question-pose stop, steer delivery, abort. That test is the contract every future
@@ -84,11 +84,26 @@ app/api/mcp/route.ts → src/server/mcp/  wraps the SAME AgentTool registries   
      has no `terminate`. Phase 2 interrupts the Claude turn after the result goes out, which is
      the same rule `makeQuestionStopper` enforces in-process.
 3. **Outside-agent mode** (a free by-product). A read-only `graph` scope (`list_sessions`,
-   `list_propositions`, `find`) behind a token minted from Settings, so a learner can point
+   `list_propositions`; `find` is auditor-only) behind a token minted by `POST /api/mcp/token`
+   (window-gated; a Settings button is still to come), so a learner can point
    their own Claude Code, t1code or t3code at their knowledge graph. Off by default, localhost only.
 4. Gate: MCP contract tests list tools per scope; call `quiz` with valid input (posed text) and
    invalid input (`isError` plus the problem list); confirm a token for chat A cannot touch
    chat B; expiry; and confirm the BYOK path is untouched.
+
+### Phase 1 as built (2026-10-25)
+
+- `src/server/mcp/{tokens,handler}.ts`, `app/api/mcp/route.ts`, `app/api/mcp/token/route.ts`.
+- The registry comes from `toolsForRole(chatId, role)` in `chat-handler.ts`. The three per-role
+  tool contexts were pulled out of the agent-construction branch into named builders, so the
+  turn and MCP share one wiring.
+- **The proxy has one exemption.** In the desktop app, every `/api/*` call needs the window's
+  per-launch capability header, which a harness process cannot have. `/api/mcp` (exact path)
+  bypasses that check and authenticates with its own bearer token instead. `/api/mcp/token` does not.
+- **Verified live:** the Claude Code 2.1.285 CLI (`claude -p --mcp-config`, HTTP transport,
+  bearer header) connects, lists the tools and calls them. It sends
+  `_meta["claudecode/toolUseId"]` with its native `toolu_…` id, which the handler uses as the
+  `toolCallId`, so job records line up with the transcript's tool calls.
 
 ## Phase 2 preview: the Claude Code driver (design only, not started)
 

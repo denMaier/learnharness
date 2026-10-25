@@ -6,6 +6,9 @@ import {
 	type AgentBuildOptions,
 } from "../agent/teacher-agent.ts";
 import type { TurnAgent } from "../agent/turn-agent.ts";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
+import { createProberTools, createTeacherTools, type ProberToolContext, type TeacherToolContext } from "../agent/tools.ts";
+import { practiceTools, type PracticeToolContext } from "../agent/tools/practice.ts";
 import { piEngineForSpec, type PiEngine } from "../agent/models.ts";
 import { connectionBackgroundAllowed, connectionScopeCurrent, isSubscriptionProvider } from "../agent/subscription-connections.ts";
 import { nativeSubscriptionError } from "../agent/subscription-stream.ts";
@@ -141,6 +144,76 @@ function resolveEngine(role: ModelRole): PiEngine | undefined {
 }
 
 setJobRespawn((jobId) => void jobRunner.runJob(jobId));
+
+// ─── Tool contexts (one per agent role) ──────────────────────────────────────
+// Shared by the turn's agent construction below and by toolsForRole (the
+// MCP toolkit, src/server/mcp/) — one wiring, so an in-process tool and its
+// MCP twin can never diverge.
+
+type EffectiveSettings = ReturnType<typeof effectiveSettings>;
+
+function practiceToolContext(chatId: string, effective: EffectiveSettings): PracticeToolContext {
+	return {
+		chatId,
+		chatStore: stores.chatStore,
+		// TARGET VALIDATION (owner round 9): the practice tools read the
+		// WHOLE graph fresh per pose — targets validate against every
+		// proposition, not just the session's picks (pickless sessions
+		// and future graph-tools poses stay valid).
+		graphNodes: () => stores.graphStore.readNodes(),
+		// THE RARELY-NEEDED SET (owner round 10): research + pdf jobs
+		// (same runner/gating as the teacher's — research honestly
+		// absent when no engine is live) and the map readers behind
+		// the SAME settings gate as the prober's.
+		jobs: {
+			chatId,
+			jobStore: stores.jobStore,
+			spawn: (job, input) => void jobRunner.runJob(job.id, input),
+			searchAvailable,
+		},
+		...(graphToolsEnabled(effective) ? { graph: { chatStore: stores.chatStore, graphStore: stores.graphStore } } : {}),
+	};
+}
+
+function teacherToolContext(chatId: string): TeacherToolContext {
+	return {
+		chatId,
+		chatStore: stores.chatStore,
+		jobStore: stores.jobStore,
+		spawn: (job, input) => void jobRunner.runJob(job.id, input),
+		// The registry drop's signal (2026-09-20): no live engine
+		// = no research tool in the teacher's registry.
+		searchAvailable,
+	};
+}
+
+function proberToolContext(chatId: string, effective: EffectiveSettings): ProberToolContext {
+	return {
+		chatId,
+		chatStore: stores.chatStore,
+		deliver: (steer) => void deliverJobResult(steer),
+		// Fix wave (2026-09-20): the prober carries research + pdf
+		// dispatch (owner ruling — phase-omnipresent), so its ctx
+		// needs the same job wiring as the teacher's.
+		jobStore: stores.jobStore,
+		spawn: (job, input) => void jobRunner.runJob(job.id, input),
+		searchAvailable,
+		// The map reader (wave 7): the prober reads the learner's
+		// knowledge graph through tools when the gate opens —
+		// graph master switch AND the agent.graphTools toggle.
+		...(graphToolsEnabled(effective) ? { graphStore: stores.graphStore } : {}),
+	};
+}
+
+/** The role-scoped tool registry exactly as a turn would build it (same
+ *  contexts, same user toggles) — the MCP toolkit's source. Settings are
+ *  read fresh per call, like a turn's. */
+export function toolsForRole(chatId: string, role: "prober" | "teacher" | "practice"): Record<string, AgentTool<any>> {
+	const effective = effectiveSettings();
+	if (role === "practice") return practiceTools(practiceToolContext(chatId, effective));
+	if (role === "teacher") return createTeacherTools(teacherToolContext(chatId), effective.agent.tools);
+	return createProberTools(proberToolContext(chatId, effective), effective.agent.tools);
+}
 
 /** The route-facing entry: parse {chatId, input} and run one turn. */
 export async function handleChatRequest(
@@ -396,60 +469,10 @@ export async function handleChatInput(
 	const constructed: TurnAgent = buildAgent
 		? buildAgent({ ...agentOpts, teaching })
 		: record.kind === "practice"
-			? createPracticeAgent(
-					{
-						chatId,
-						chatStore: stores.chatStore,
-						// TARGET VALIDATION (owner round 9): the practice tools read the
-						// WHOLE graph fresh per pose — targets validate against every
-						// proposition, not just the session's picks (pickless sessions
-						// and future graph-tools poses stay valid).
-						graphNodes: () => stores.graphStore.readNodes(),
-						// THE RARELY-NEEDED SET (owner round 10): research + pdf jobs
-						// (same runner/gating as the teacher's — research honestly
-						// absent when no engine is live) and the map readers behind
-						// the SAME settings gate as the prober's.
-						jobs: {
-							chatId,
-							jobStore: stores.jobStore,
-							spawn: (job, input) => void jobRunner.runJob(job.id, input),
-							searchAvailable,
-						},
-						...(graphToolsEnabled(effective) ? { graph: { chatStore: stores.chatStore, graphStore: stores.graphStore } } : {}),
-					},
-					agentOpts,
-				)
+			? createPracticeAgent(practiceToolContext(chatId, effective), agentOpts)
 			: teaching
-			? createTeacherAgent(
-					{
-						chatId,
-						chatStore: stores.chatStore,
-						jobStore: stores.jobStore,
-						spawn: (job, input) => void jobRunner.runJob(job.id, input),
-						// The registry drop's signal (2026-09-20): no live engine
-						// = no research tool in the teacher's registry.
-						searchAvailable,
-					},
-					agentOpts,
-				)
-			: createProberAgent(
-					{
-						chatId,
-						chatStore: stores.chatStore,
-						deliver: (steer) => void deliverJobResult(steer),
-						// Fix wave (2026-09-20): the prober carries research + pdf
-						// dispatch (owner ruling — phase-omnipresent), so its ctx
-						// needs the same job wiring as the teacher's.
-						jobStore: stores.jobStore,
-						spawn: (job, input) => void jobRunner.runJob(job.id, input),
-						searchAvailable,
-						// The map reader (wave 7): the prober reads the learner's
-						// knowledge graph through tools when the gate opens —
-						// graph master switch AND the agent.graphTools toggle.
-						...(graphToolsEnabled(effective) ? { graphStore: stores.graphStore } : {}),
-					},
-					agentOpts,
-				);
+			? createTeacherAgent(teacherToolContext(chatId), agentOpts)
+			: createProberAgent(proberToolContext(chatId, effective), agentOpts);
 
 	// A test-injected agent gets no usage collector (tests assert the
 	// transcript, not the money channel); when it's ours, usage flows through

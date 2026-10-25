@@ -63,6 +63,12 @@ test("all methods fail closed for desktop missing/wrong secret; API-only matcher
 			assert.equal(proxy(new NextRequest(origin + "/api/settings", { method })).status, 403);
 			assert.equal(proxy(new NextRequest(origin + "/api/settings", { method, headers: { [HEADER]: secret } })).headers.get("x-middleware-next"), "1");
 		}
+		// The MCP endpoint is the one exemption (bearer-authenticated by its own
+		// handler); its token-minting sibling and look-alike paths are not.
+		assert.equal(proxy(new NextRequest(origin + "/api/mcp", { method: "POST" })).headers.get("x-middleware-next"), "1");
+		for (const pathname of ["/api/mcp/token", "/api/mcp/", "/api/mcpx", "/api/MCP"]) {
+			assert.equal(proxy(new NextRequest(origin + pathname, { method: "POST" })).status, 403, pathname);
+		}
 	} finally {
 		if (originalMarker === undefined) delete process.env.LH_DESKTOP_SERVER; else process.env.LH_DESKTOP_SERVER = originalMarker;
 		if (originalSecret === undefined) delete process.env.LH_DESKTOP_API_SECRET; else process.env.LH_DESKTOP_API_SECRET = originalSecret;
